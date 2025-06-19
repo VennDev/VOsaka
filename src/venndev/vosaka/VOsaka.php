@@ -218,7 +218,7 @@ final class VOsaka
                 }
             }
 
-            if (self::$enableMaximumPeriod && $i >= self::$maximumPeriod) {
+            if (self::$enableMaximumPeriod && ++$i >= self::$maximumPeriod) {
                 if ($runUntilEmpty) {
                     continue;
                 }
