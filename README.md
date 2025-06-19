@@ -59,6 +59,7 @@ VOsaka::join(
     task1(),
     task2()
 );
+VOsaka::run();
 ```
 
 - Handle tasks with sleep, select
@@ -84,6 +85,7 @@ VOsaka::select(
     workA(),
     workB()
 );
+VOsaka::run();
 ```
 
 - Handle more advanced tasks.
