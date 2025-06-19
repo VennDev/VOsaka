@@ -7,10 +7,6 @@ namespace venndev\vosaka;
 use Generator;
 use Throwable;
 
-/**
- * Tracer class for VOsaka - provides comprehensive tracing capabilities
- * for asynchronous operations, performance monitoring, and debugging
- */
 final class VTracer
 {
     private static ?VTracer $instance = null;
@@ -23,18 +19,22 @@ final class VTracer
         'flush_threshold' => 100,
         'include_stack_trace' => true,
         'min_duration_ms' => 0,
-        'output_format' => 'json', // json, text, structured
+        'output_format' => 'json',
         'output_file' => null,
-        'memory_limit_mb' => 50
+        'memory_limit_mb' => 50,
+        'max_logs_per_span' => 1000,
+        'log_yield_interval' => 100
     ];
     private int $spanIdCounter = 0;
     private array $contextStack = [];
+    private array $runningGenerators = [];
 
     private function __construct()
     {
         $this->traces = [];
         $this->activeSpans = [];
         $this->contextStack = [];
+        $this->runningGenerators = [];
     }
 
     public static function getInstance(): self
@@ -45,9 +45,6 @@ final class VTracer
         return self::$instance;
     }
 
-    /**
-     * Enable tracing with optional configuration
-     */
     public function enable(array $config = []): self
     {
         $this->enabled = true;
@@ -55,26 +52,17 @@ final class VTracer
         return $this;
     }
 
-    /**
-     * Disable tracing
-     */
     public function disable(): self
     {
         $this->enabled = false;
         return $this;
     }
 
-    /**
-     * Check if tracing is enabled
-     */
     public function isEnabled(): bool
     {
         return $this->enabled;
     }
 
-    /**
-     * Start a new trace span
-     */
     public function startSpan(string $operation, array $tags = [], ?string $parentSpanId = null): string
     {
         if (!$this->enabled) {
@@ -104,9 +92,6 @@ final class VTracer
         return $spanId;
     }
 
-    /**
-     * Finish a trace span
-     */
     public function finishSpan(string $spanId, array $finalTags = []): void
     {
         if (!$this->enabled || !isset($this->activeSpans[$spanId])) {
@@ -115,7 +100,7 @@ final class VTracer
 
         $span = &$this->activeSpans[$spanId];
         $endTime = microtime(true);
-        $duration = ($endTime - $span['start_time']) * 1000; // Convert to milliseconds
+        $duration = ($endTime - $span['start_time']) * 1000;
 
         $span['end_time'] = $endTime;
         $span['duration_ms'] = round($duration, 3);
@@ -124,7 +109,6 @@ final class VTracer
         $span['final_memory_usage'] = memory_get_usage(true);
         $span['memory_delta'] = $span['final_memory_usage'] - $span['memory_usage'];
 
-        // Only keep traces that meet minimum duration threshold
         if ($duration >= $this->config['min_duration_ms']) {
             $this->traces[] = $span;
         }
@@ -132,18 +116,13 @@ final class VTracer
         unset($this->activeSpans[$spanId]);
         $this->popContext($spanId);
 
-        // Auto-flush if threshold reached
         if ($this->config['auto_flush'] && count($this->traces) >= $this->config['flush_threshold']) {
             $this->flush();
         }
 
-        // Memory management
         $this->checkMemoryLimit();
     }
 
-    /**
-     * Add a log entry to current or specified span
-     */
     public function log(string $message, array $fields = [], ?string $spanId = null): void
     {
         if (!$this->enabled) {
@@ -153,18 +132,18 @@ final class VTracer
         $targetSpanId = $spanId ?? $this->getCurrentSpanId();
         
         if ($targetSpanId && isset($this->activeSpans[$targetSpanId])) {
-            $this->activeSpans[$targetSpanId]['logs'][] = [
-                'timestamp' => microtime(true),
-                'message' => $message,
-                'fields' => $fields,
-                'level' => $fields['level'] ?? 'info'
-            ];
+            $logs = &$this->activeSpans[$targetSpanId]['logs'];
+            if (count($logs) < $this->config['max_logs_per_span']) {
+                $logs[] = [
+                    'timestamp' => microtime(true),
+                    'message' => $message,
+                    'fields' => $fields,
+                    'level' => $fields['level'] ?? 'info'
+                ];
+            }
         }
     }
 
-    /**
-     * Add tags to current or specified span
-     */
     public function tag(array $tags, ?string $spanId = null): void
     {
         if (!$this->enabled) {
@@ -181,9 +160,6 @@ final class VTracer
         }
     }
 
-    /**
-     * Mark span as failed with error information
-     */
     public function recordError(Throwable $error, ?string $spanId = null): void
     {
         if (!$this->enabled) {
@@ -205,9 +181,6 @@ final class VTracer
         }
     }
 
-    /**
-     * Trace a Generator function automatically
-     */
     public function traceGenerator(Generator $generator, string $operation, array $tags = []): Generator
     {
         if (!$this->enabled) {
@@ -215,33 +188,41 @@ final class VTracer
             return;
         }
 
+        $generatorHash = spl_object_hash($generator);
+        if (isset($this->runningGenerators[$generatorHash])) {
+            yield from $generator;
+            return;
+        }
+
+        $this->runningGenerators[$generatorHash] = true;
         $spanId = $this->startSpan($operation, array_merge(['type' => 'generator'], $tags));
         
         try {
             $yieldCount = 0;
             while ($generator->valid()) {
                 $value = $generator->current();
-                $this->log("Generator yielded", ['yield_count' => ++$yieldCount, 'value_type' => gettype($value)]);
-                
+                if ($yieldCount % $this->config['log_yield_interval'] === 0) {
+                    $this->log("Generator yielded", ['yield_count' => $yieldCount, 'value_type' => gettype($value)]);
+                }
                 yield $value;
                 $generator->next();
+                $yieldCount++;
             }
             
             $result = $generator->getReturn();
             $this->tag(['yield_count' => $yieldCount, 'completed' => true], $spanId);
             $this->finishSpan($spanId);
             
+            unset($this->runningGenerators[$generatorHash]);
             return $result;
         } catch (Throwable $e) {
             $this->recordError($e, $spanId);
             $this->finishSpan($spanId, ['error' => true]);
+            unset($this->runningGenerators[$generatorHash]);
             throw $e;
         }
     }
 
-    /**
-     * Trace a callable function
-     */
     public function traceCallable(callable $callable, string $operation, array $args = [], array $tags = [])
     {
         if (!$this->enabled) {
@@ -262,25 +243,16 @@ final class VTracer
         }
     }
 
-    /**
-     * Get all completed traces
-     */
     public function getTraces(): array
     {
         return $this->traces;
     }
 
-    /**
-     * Get active spans
-     */
     public function getActiveSpans(): array
     {
         return $this->activeSpans;
     }
 
-    /**
-     * Get trace statistics
-     */
     public function getStats(): array
     {
         $totalTraces = count($this->traces);
@@ -303,9 +275,6 @@ final class VTracer
         ];
     }
 
-    /**
-     * Export traces in various formats
-     */
     public function export(string $format = null): string
     {
         $format = $format ?? $this->config['output_format'];
@@ -322,34 +291,13 @@ final class VTracer
         }
     }
 
-    /**
-     * Flush traces to output file or return as string
-     */
-    public function flush(): string
-    {
-        $output = $this->export();
-        
-        if ($this->config['output_file']) {
-            file_put_contents($this->config['output_file'], $output . PHP_EOL, FILE_APPEND | LOCK_EX);
-        }
-        
-        // Clear traces after flush to free memory
-        $this->traces = [];
-        
-        return $output;
-    }
-
-    /**
-     * Clear all traces and active spans
-     */
     public function clear(): void
     {
         $this->traces = [];
         $this->activeSpans = [];
         $this->contextStack = [];
+        $this->runningGenerators = [];
     }
-
-    // Private helper methods
 
     private function generateSpanId(): string
     {
@@ -378,20 +326,88 @@ final class VTracer
     {
         $memoryMB = memory_get_usage(true) / 1024 / 1024;
         if ($memoryMB > $this->config['memory_limit_mb']) {
-            // Keep only the most recent traces
             $keepCount = (int)($this->config['max_traces'] * 0.7);
             $this->traces = array_slice($this->traces, -$keepCount);
+            $activeSpanCount = count($this->activeSpans);
+            if ($activeSpanCount > $this->config['max_traces']) {
+                $keys = array_keys($this->activeSpans);
+                $removeCount = (int)($activeSpanCount * 0.3);
+                for ($i = 0; $i < $removeCount; $i++) {
+                    unset($this->activeSpans[$keys[$i]]);
+                    $this->popContext($keys[$i]);
+                }
+            }
         }
     }
 
-    private function exportJson(): string
+    private function exportJson(bool $prettyPrint = false): string
     {
-        return json_encode([
-            'traces' => $this->traces,
-            'stats' => $this->getStats(),
-            'exported_at' => date('c'),
-            'config' => $this->config
-        ], JSON_PRETTY_PRINT);
+        $generator = $this->streamJson($prettyPrint);
+        $output = '';
+
+        foreach ($generator as $chunk) {
+            $output .= $chunk;
+        }
+
+        return $output;
+    }
+
+    private function streamJson(bool $prettyPrint = false): Generator
+    {
+        $indent = $prettyPrint ? '  ' : '';
+        $newline = $prettyPrint ? "\n" : '';
+        $level = 0;
+
+        yield '{' . $newline;
+        yield $indent . '"traces": [' . $newline;
+        $traceCount = count($this->traces);
+        foreach ($this->traces as $index => $trace) {
+            yield $indent . $indent . json_encode($trace, JSON_THROW_ON_ERROR);
+            if ($index < $traceCount - 1) {
+                yield ',' . $newline;
+            } else {
+                yield $newline;
+            }
+        }
+        yield $indent . '],' . $newline;
+        yield $indent . '"stats": ' . json_encode($this->getStats(), JSON_THROW_ON_ERROR) . ',' . $newline;
+        yield $indent . '"exported_at": "' . date('c') . '",' . $newline;
+        yield $indent . '"config": ' . json_encode($this->config, JSON_THROW_ON_ERROR) . $newline;
+        yield '}' . $newline;
+    }
+
+    private function streamToFile(string $filePath, bool $prettyPrint = false): bool
+    {
+        try {
+            $handle = fopen($filePath, 'a');
+            if ($handle === false) {
+                return false;
+            }
+
+            $generator = $this->streamJson($prettyPrint);
+            foreach ($generator as $chunk) {
+                fwrite($handle, $chunk);
+            }
+
+            fclose($handle);
+            return true;
+        } catch (Throwable $e) {
+            return false;
+        }
+    }
+
+    public function flush(): string
+    {
+        if ($this->config['output_file']) {
+            $result = $this->streamToFile($this->config['output_file'], $this->config['output_format'] === 'json' && false);
+            if (!$result) {
+                $this->log('Failed to write traces to file: ' . $this->config['output_file'], ['level' => 'error']);
+            }
+        }
+
+        $output = $this->export();
+        $this->traces = [];
+        return $output;
     }
 
     private function exportText(): string
@@ -440,7 +456,7 @@ final class VTracer
         
         foreach ($this->traces as $trace) {
             $structured[] = [
-                'timestamp' => date('c', $trace['start_time']),
+                'timestamp' => date('c', (int)$trace['start_time']),
                 'operation' => $trace['operation'],
                 'duration_ms' => $trace['duration_ms'],
                 'status' => $trace['status'],
@@ -453,6 +469,6 @@ final class VTracer
             ];
         }
         
-        return json_encode($structured, JSON_PRETTY_PRINT);
+        return json_encode($structured, JSON_THROW_ON_ERROR);
     }
 }
