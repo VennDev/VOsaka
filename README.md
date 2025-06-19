@@ -85,7 +85,6 @@ VOsaka::select(
     workA(),
     workB()
 );
-VOsaka::run();
 ```
 
 - Handle more advanced tasks.
