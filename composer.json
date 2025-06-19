@@ -2,7 +2,7 @@
     "name": "venndev/v-osaka",
     "description": "A library for php async, ..",
     "type": "library",
-    "license": "MIT License",
+    "license": "MIT",
     "autoload": {
         "psr-4": {
             "venndev\\vosaka\\": "src/venndev/vosaka"
