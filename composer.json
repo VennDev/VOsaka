@@ -5,7 +5,7 @@
     "license": "MIT License",
     "autoload": {
         "psr-4": {
-            "venndev\\vosaka\\": "src/"
+            "venndev\\vosaka\\": "src/venndev/vosaka"
         }
     },
     "authors": [

@@ -29,3 +29,4 @@ VOsaka::join(
     task1(),
     task2()
 );
+VOsaka::run();

@@ -5,11 +5,13 @@ declare(strict_types=1);
 namespace venndev\vosaka;
 
 use Generator;
+use RuntimeException;
 use SplQueue;
 use InvalidArgumentException;
 use Closure;
 use SplObjectStorage;
 use stdClass;
+use Throwable;
 
 /**
  * Async task scheduler for PHP using generators
@@ -32,7 +34,6 @@ final class VOsaka
     {
         self::initializeTaskQueue();
         self::enqueueTasks($tasks);
-        self::executeAllTasks();
     }
 
     /**
@@ -108,6 +109,51 @@ final class VOsaka
 
         while (time() < $endTime) {
             yield;
+        }
+    }
+
+    /**
+     * Retry a task with exponential backoff
+     * 
+     * @param callable $taskFactory A callable that returns a Generator
+     * @param int $maxRetries Maximum number of retries
+     * @param int $delaySeconds Initial delay in seconds
+     * @param int $backOffMultiplier Multiplier for exponential backoff
+     * @param callable|null $shouldRetry Optional callback to determine if the task should be retried
+     */
+    public static function retry(
+        callable $taskFactory, 
+        int $maxRetries = 3, 
+        int $delaySeconds = 1, 
+        int $backOffMultiplier = 2, 
+        ?callable $shouldRetry = null
+    ): Generator {
+        $retries = 0;
+
+        while ($retries < $maxRetries) {
+            try {
+                $task = $taskFactory();
+                if (!$task instanceof Generator) {
+                    throw new InvalidArgumentException(
+                        'Task must return a Generator'
+                    );
+                }
+                yield from $task;
+                return;
+            } catch (Throwable $e) {
+                if ($shouldRetry && !$shouldRetry($e)) {
+                    throw $e;
+                }
+                $retries++;
+                if ($retries >= $maxRetries) {
+                    throw new RuntimeException(
+                        "Task failed after {$maxRetries} retries", 0, $e
+                    );
+                }
+
+                $delay = (int) ($delaySeconds * pow($backOffMultiplier, $retries - 1));
+                yield from self::sleep($delay);
+            }
         }
     }
 
@@ -193,9 +239,22 @@ final class VOsaka
     {
         $i = 0;
         while (!self::$taskQueue->isEmpty()) {
+            /**
+             * @var Task $taskWrapper
+             */
             $taskWrapper = self::$taskQueue->dequeue();
 
+            // Skip tasks that are already running
+            if ($taskWrapper->isRunning) {
+                self::$taskQueue->enqueue($taskWrapper);
+                continue;
+            }
+
+            // Mark task as running
+            $taskWrapper->isRunning = true;
+
             if (!$taskWrapper->task->valid()) {
+                $taskWrapper->isRunning = false;
                 self::executeCleanupTasks($taskWrapper->id);
                 if ($stopAfterFirst) {
                     return;
@@ -203,8 +262,14 @@ final class VOsaka
                 continue;
             }
 
-            $yieldedValue = $taskWrapper->task->current();
-            $taskWrapper->task->next();
+            try {
+                $yieldedValue = $taskWrapper->task->current();
+                $taskWrapper->task->next();
+            } catch (Throwable $e) {
+                $taskWrapper->isRunning = false;
+                self::executeCleanupTasks($taskWrapper->id);
+                throw $e;
+            }
 
             self::handleYieldedValue($taskWrapper, $yieldedValue);
             self::checkForTimeouts($taskWrapper->id);
@@ -212,11 +277,14 @@ final class VOsaka
             if ($taskWrapper->task->valid()) {
                 self::$taskQueue->enqueue($taskWrapper);
             } else {
+                $taskWrapper->isRunning = false;
                 self::executeCleanupTasks($taskWrapper->id);
                 if ($stopAfterFirst) {
                     return;
                 }
             }
+
+            $taskWrapper->isRunning = false;
 
             if (self::$enableMaximumPeriod && ++$i >= self::$maximumPeriod) {
                 if ($runUntilEmpty) {

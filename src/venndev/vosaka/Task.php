@@ -7,6 +7,7 @@ use Generator;
 final class Task {
 
     public readonly int $time;
+    public bool $isRunning = false;
 
     public function __construct(
         public readonly Generator $task,
