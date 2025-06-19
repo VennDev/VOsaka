@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace venndev\vosaka;
 
 use Generator;
+use InvalidArgumentException;
+use RuntimeException;
 
 final class VStream
 {
@@ -23,7 +25,7 @@ final class VStream
     public static function write(string $path, string $data): Generator
     {
         if (self::isUrl($path)) {
-            throw new \InvalidArgumentException("Writing to URLs is not supported: $path");
+            throw new InvalidArgumentException("Writing to URLs is not supported: $path");
         }
 
         yield from self::writeToFile($path, $data);
@@ -32,12 +34,12 @@ final class VStream
     public static function writeStream(string $path, Generator $dataStream): Generator
     {
         if (self::isUrl($path)) {
-            throw new \InvalidArgumentException("Writing to URLs is not supported: $path");
+            throw new InvalidArgumentException("Writing to URLs is not supported: $path");
         }
 
         $stream = @fopen($path, 'wb');
         if (!$stream) {
-            throw new \RuntimeException("Failed to open file for writing: $path");
+            throw new RuntimeException("Failed to open file for writing: $path");
         }
 
         $totalBytesWritten = 0;
@@ -46,7 +48,7 @@ final class VStream
             foreach ($dataStream as $chunk) {
                 $bytesWritten = fwrite($stream, $chunk);
                 if ($bytesWritten === false) {
-                    throw new \RuntimeException("Failed to write to file: $path");
+                    throw new RuntimeException("Failed to write to file: $path");
                 }
                 $totalBytesWritten += $bytesWritten;
                 yield $bytesWritten;
@@ -81,23 +83,23 @@ final class VStream
     private static function readFromFile(string $path): Generator
     {
         if (!file_exists($path)) {
-            throw new \InvalidArgumentException("File does not exist: $path");
+            throw new InvalidArgumentException("File does not exist: $path");
         }
 
         if (!is_readable($path)) {
-            throw new \InvalidArgumentException("File is not readable: $path");
+            throw new InvalidArgumentException("File is not readable: $path");
         }
 
         $stream = @fopen($path, 'rb');
         if (!$stream) {
-            throw new \RuntimeException("Failed to open file: $path");
+            throw new RuntimeException("Failed to open file: $path");
         }
 
         try {
             while (!feof($stream)) {
                 $chunk = fread($stream, self::CHUNK_SIZE);
                 if ($chunk === false) {
-                    throw new \RuntimeException("Failed to read file: $path");
+                    throw new RuntimeException("Failed to read file: $path");
                 }
                 if ($chunk !== '') {
                     yield $chunk;
@@ -129,7 +131,7 @@ final class VStream
 
         $stream = @fopen($url, 'rb', false, $context);
         if (!$stream) {
-            throw new \RuntimeException("Failed to open URL: $url");
+            throw new RuntimeException("Failed to open URL: $url");
         }
 
         try {
@@ -140,9 +142,9 @@ final class VStream
                 if ($chunk === false) {
                     $meta = stream_get_meta_data($stream);
                     if ($meta['timed_out']) {
-                        throw new \RuntimeException("Timeout while reading URL: $url");
+                        throw new RuntimeException("Timeout while reading URL: $url");
                     }
-                    throw new \RuntimeException("Failed to read URL: $url");
+                    throw new RuntimeException("Failed to read URL: $url");
                 }
                 if ($chunk !== '') {
                     yield $chunk;
@@ -158,19 +160,19 @@ final class VStream
         $directory = dirname($path);
         if (!is_dir($directory)) {
             if (!mkdir($directory, 0755, true)) {
-                throw new \RuntimeException("Failed to create directory: $directory");
+                throw new RuntimeException("Failed to create directory: $directory");
             }
         }
 
         $stream = @fopen($path, 'wb');
         if (!$stream) {
-            throw new \RuntimeException("Failed to open file for writing: $path");
+            throw new RuntimeException("Failed to open file for writing: $path");
         }
 
         try {
             $bytesWritten = fwrite($stream, $data);
             if ($bytesWritten === false) {
-                throw new \RuntimeException("Failed to write to file: $path");
+                throw new RuntimeException("Failed to write to file: $path");
             }
             yield $bytesWritten;
         } finally {
@@ -184,11 +186,11 @@ final class VStream
             return self::getUrlSize($pathOrUrl);
         } else {
             if (!file_exists($pathOrUrl)) {
-                throw new \InvalidArgumentException("File does not exist: $pathOrUrl");
+                throw new InvalidArgumentException("File does not exist: $pathOrUrl");
             }
             $size = filesize($pathOrUrl);
             if ($size === false) {
-                throw new \RuntimeException("Failed to get file size: $pathOrUrl");
+                throw new RuntimeException("Failed to get file size: $pathOrUrl");
             }
             return $size;
         }
@@ -206,7 +208,7 @@ final class VStream
 
         $headers = @get_headers($url, true, $context);
         if ($headers === false) {
-            throw new \RuntimeException("Failed to get headers for URL: $url");
+            throw new RuntimeException("Failed to get headers for URL: $url");
         }
 
         $contentLength = null;
@@ -218,7 +220,7 @@ final class VStream
         }
 
         if ($contentLength === null) {
-            throw new \RuntimeException("Content-Length header not found for URL: $url");
+            throw new RuntimeException("Content-Length header not found for URL: $url");
         }
 
         return (int) $contentLength;

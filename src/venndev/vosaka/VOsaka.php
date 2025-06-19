@@ -169,9 +169,9 @@ final class VOsaka
     /**
      * Create a deferred task
      */
-    public static function defer(Closure $task): Defer
+    public static function defer(Closure $task, mixed ...$args): Defer
     {
-        return new Defer($task);
+        return new Defer($task, ...$args);
     }
 
     /**
@@ -321,6 +321,7 @@ final class VOsaka
         $deferWrapper = new stdClass();
         $deferWrapper->id = $taskWrapper->id;
         $deferWrapper->task = $defer->task;
+        $deferWrapper->args = $defer->args;
 
         self::$deferredTasks->attach($deferWrapper, $defer->task);
     }
@@ -366,7 +367,7 @@ final class VOsaka
             }
 
             $deferredTask = $deferWrapper->task;
-            $result = $deferredTask();
+            $result = $deferredTask(...$deferWrapper->args);
 
             if ($result instanceof Generator) {
                 self::exhaustGenerator($result);
