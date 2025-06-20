@@ -21,6 +21,7 @@ final class VOsaka
     private static ?SplQueue $taskQueue = null;
     private static ?SplObjectStorage $deferredTasks = null;
     private static ?SplObjectStorage $timeoutTasks = null;
+    private static array $errorsTasks = [];
     private static int $nextTaskId = 0;
 
     // Maximum tasks to run per period
@@ -49,17 +50,25 @@ final class VOsaka
     /**
      * Await a single task completion
      */
-    public static function await(Generator|Closure $task): Generator
+    public static function await(Generator|Closure $task): Result
     {
         self::initializeTaskQueue();
-        $generator = self::convertToGenerator($task);
-        $taskWrapper = self::enqueueTask($generator);
+        $fn = function () use ($task): Generator {
+            $generator = self::convertToGenerator($task);
+            $taskWrapper = self::enqueueTask($generator, true);
 
-        while ($taskWrapper->task->valid()) {
-            yield;
-        }
+            while ($taskWrapper->task->valid()) {
+                yield;
+            }
 
-        return $taskWrapper->task->getReturn();
+            try {
+                return $taskWrapper->task->getReturn();
+            } catch (Throwable $e) {
+                $result = self::getErrorFromTaskAndRemove($taskWrapper);
+                return $result ?: $e;
+            }
+        };
+        return new Result($fn());
     }
 
     /**
@@ -179,9 +188,9 @@ final class VOsaka
     private static function createRepeatTask(Generator|Closure $task, int $interval): Task|RepeatTask
     {
         return self::buildTask(
-            $task,
-            true,
-            $interval
+            callable: $task,
+            repeat: true,
+            interval: $interval
         );
     }
 
@@ -228,6 +237,24 @@ final class VOsaka
         }
     }
 
+    private static function addErrorToTask(Task $task, Throwable $error): void
+    {
+        self::$errorsTasks[$task->id] = $error;
+    }
+
+    private static function getErrorFromTaskAndRemove(Task $task): mixed
+    {
+        if (isset(self::$errorsTasks[$task->id])) {
+            /**
+             * @var Throwable $error
+             */
+            $error = self::$errorsTasks[$task->id];
+            unset(self::$errorsTasks[$task->id]);
+            return $error;
+        }
+        return null;
+    }
+
     private static function enqueueTasks(array $tasks): void
     {
         foreach ($tasks as $task) {
@@ -235,17 +262,25 @@ final class VOsaka
         }
     }
 
-    private static function buildTask(Generator|Closure $callable, bool $repeat = false, int $interval = 0): Task|RepeatTask
-    {
+    private static function buildTask(
+        Generator|Closure $callable,
+        bool $await = false,
+        bool $repeat = false,
+        int $interval = 0
+    ): Task|RepeatTask {
         if ($repeat) {
-            return new RepeatTask(fn() => $callable, self::generateTaskId(), $interval);
+            return new RepeatTask(
+                fn() => $callable,
+                self::generateTaskId(),
+                $interval
+            );
         }
-        return new Task($callable, self::generateTaskId());
+        return new Task($callable, $await, self::generateTaskId());
     }
 
-    private static function enqueueTask(Generator $generator): Task
+    public static function enqueueTask(Generator $generator, bool $await = false): Task
     {
-        $taskWrapper = self::buildTask($generator);
+        $taskWrapper = self::buildTask($generator, $await);
         self::$taskQueue->enqueue($taskWrapper);
         return $taskWrapper;
     }
@@ -299,7 +334,11 @@ final class VOsaka
                 } catch (Throwable $e) {
                     $taskWrapper->isRunning = false;
                     self::executeCleanupTasks($taskWrapper->id);
-                    throw $e;
+                    if ($taskWrapper->await) {
+                        self::addErrorToTask($taskWrapper, $e);
+                    } else {
+                        throw $e;
+                    }
                 }
             }
 

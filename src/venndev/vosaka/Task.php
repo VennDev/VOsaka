@@ -13,6 +13,7 @@ final class Task
 
     public function __construct(
         public Generator $task,
+        public readonly bool $await = false,
         public readonly int $id = 0,
     ) {
         $this->time = time();
