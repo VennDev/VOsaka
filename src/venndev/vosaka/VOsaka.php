@@ -99,7 +99,7 @@ final class VOsaka
     /**
      * Sleep for specified seconds (non-blocking)
      */
-    public static function sleep(int $seconds): Generator
+    public static function sleep(float $seconds): Generator
     {
         if ($seconds <= 0) {
             return;
@@ -122,10 +122,10 @@ final class VOsaka
      * @param callable|null $shouldRetry Optional callback to determine if the task should be retried
      */
     public static function retry(
-        callable $taskFactory, 
-        int $maxRetries = 3, 
-        int $delaySeconds = 1, 
-        int $backOffMultiplier = 2, 
+        callable $taskFactory,
+        int $maxRetries = 3,
+        int $delaySeconds = 1,
+        int $backOffMultiplier = 2,
         ?callable $shouldRetry = null
     ): Generator {
         $retries = 0;
@@ -147,7 +147,9 @@ final class VOsaka
                 $retries++;
                 if ($retries >= $maxRetries) {
                     throw new RuntimeException(
-                        "Task failed after {$maxRetries} retries", 0, $e
+                        "Task failed after {$maxRetries} retries",
+                        0,
+                        $e
                     );
                 }
 
@@ -174,6 +176,23 @@ final class VOsaka
         return new Defer($task, ...$args);
     }
 
+    private static function createRepeatTask(Generator|Closure $task, int $interval): Task|RepeatTask
+    {
+        return self::buildTask(
+            $task,
+            true,
+            $interval
+        );
+    }
+
+    public static function repeat(Closure $task, int $interval = 1): RepeatTask
+    {
+        $taskWrapper = self::createRepeatTask($task, $interval);
+        self::initializeTaskQueue();
+        self::$taskQueue->enqueue($taskWrapper);
+        return $taskWrapper;
+    }
+
     /**
      * Run all pending tasks
      */
@@ -185,7 +204,7 @@ final class VOsaka
     // Private helper methods
     private static function generateTaskId(): int
     {
-        return self::$nextTaskId++;
+        return self::$nextTaskId >= PHP_INT_MAX ? self::$nextTaskId = 0 : self::$nextTaskId++;
     }
 
     private static function initializeTaskQueue(): void
@@ -216,9 +235,17 @@ final class VOsaka
         }
     }
 
+    private static function buildTask(Generator|Closure $callable, bool $repeat = false, int $interval = 0): Task|RepeatTask
+    {
+        if ($repeat) {
+            return new RepeatTask(fn() => $callable, self::generateTaskId(), $interval);
+        }
+        return new Task($callable, self::generateTaskId());
+    }
+
     private static function enqueueTask(Generator $generator): Task
     {
-        $taskWrapper = new Task($generator, self::generateTaskId());
+        $taskWrapper = self::buildTask($generator);
         self::$taskQueue->enqueue($taskWrapper);
         return $taskWrapper;
     }
@@ -237,63 +264,77 @@ final class VOsaka
 
     private static function executeTasks(bool $stopAfterFirst = false, bool $runUntilEmpty = false): void
     {
-        $i = 0;
-        while (!self::$taskQueue->isEmpty()) {
-            /**
-             * @var Task $taskWrapper
-             */
+        while (true) {
+            if (self::$taskQueue->isEmpty()) {
+                if (!$runUntilEmpty) {
+                    return;
+                }
+                continue;
+            }
+
             $taskWrapper = self::$taskQueue->dequeue();
 
-            // Skip tasks that are already running
-            if ($taskWrapper->isRunning) {
-                self::$taskQueue->enqueue($taskWrapper);
-                continue;
-            }
-
-            // Mark task as running
-            $taskWrapper->isRunning = true;
-
-            if (!$taskWrapper->task->valid()) {
-                $taskWrapper->isRunning = false;
-                self::executeCleanupTasks($taskWrapper->id);
-                if ($stopAfterFirst) {
-                    return;
-                }
-                continue;
-            }
-
-            try {
-                $yieldedValue = $taskWrapper->task->current();
-                $taskWrapper->task->next();
-            } catch (Throwable $e) {
-                $taskWrapper->isRunning = false;
-                self::executeCleanupTasks($taskWrapper->id);
-                throw $e;
-            }
-
-            self::handleYieldedValue($taskWrapper, $yieldedValue);
-            self::checkForTimeouts($taskWrapper->id);
-
-            if ($taskWrapper->task->valid()) {
-                self::$taskQueue->enqueue($taskWrapper);
-            } else {
-                $taskWrapper->isRunning = false;
-                self::executeCleanupTasks($taskWrapper->id);
-                if ($stopAfterFirst) {
-                    return;
-                }
-            }
-
-            $taskWrapper->isRunning = false;
-
-            if (self::$enableMaximumPeriod && ++$i >= self::$maximumPeriod) {
-                if ($runUntilEmpty) {
+            if ($taskWrapper instanceof Task) {
+                if ($taskWrapper->isRunning) {
+                    self::$taskQueue->enqueue($taskWrapper);
                     continue;
                 }
+
+                $taskWrapper->isRunning = true;
+
+                try {
+                    if ($taskWrapper->task->valid()) {
+                        $yieldedValue = $taskWrapper->task->current();
+                        $taskWrapper->task->next();
+                        self::handleYieldedValue($taskWrapper, $yieldedValue);
+                        self::checkForTimeouts($taskWrapper->id);
+                    }
+
+                    $taskWrapper->isRunning = false;
+                    if ($taskWrapper->task->valid()) {
+                        self::$taskQueue->enqueue($taskWrapper);
+                    } else {
+                        self::executeCleanupTasks($taskWrapper->id);
+                    }
+                } catch (Throwable $e) {
+                    $taskWrapper->isRunning = false;
+                    self::executeCleanupTasks($taskWrapper->id);
+                    throw $e;
+                }
+            }
+
+            if ($taskWrapper instanceof RepeatTask) {
+                if ($taskWrapper->canRun()) {
+                    self::handleRepeatTask($taskWrapper);
+                    $taskWrapper->resetTime();
+                }
+                self::$taskQueue->enqueue($taskWrapper);
+            }
+
+            if ($stopAfterFirst) {
                 return;
             }
         }
     }
+
+    private static function handleRepeatTask(RepeatTask $taskWrapper): void
+    {
+        $result = ($taskWrapper->task)();
+        self::resolveAndSpawn($result);
+    }
+
+    private static function resolveAndSpawn(mixed $result): void
+    {
+        if ($result instanceof Closure) {
+            self::resolveAndSpawn($result());
+            return;
+        }
+
+        if ($result instanceof Generator) {
+            self::spawn($result);
+        }
+    }
+
 
     private static function handleYieldedValue(Task $taskWrapper, mixed $yieldedValue): void
     {
