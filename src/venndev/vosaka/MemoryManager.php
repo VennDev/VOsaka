@@ -4,55 +4,91 @@ declare(strict_types=1);
 
 namespace venndev\vosaka;
 
-final class MemoryManager
+/**
+ * Optimized MemoryManager class with better performance characteristics
+ */
+class MemoryManager
 {
-    private bool $isInitialized = false;
-    private int $maxMemoryUsage = 0;
+    private float $memoryLimit; // MB
+    private int $gcInterval; // Collect garbage every X tasks
+    private int $taskCounter = 0;
+    private float $lastMemoryUsage = 0;
+    private int $memoryCheckCounter = 0;
+    private const AGGRESSIVE_GC_THRESHOLD = 0.8; // 80% of memory limit
 
-    /**
-     * Initializes the MemoryManager with a specified maximum memory usage.
-     * If no value is provided, it defaults to the PHP memory limit.
-     *
-     * @param int $maxMemoryUsage Maximum memory usage in bytes (0 for default PHP limit).
-     */
-    public function init(int $maxMemoryUsage = 0): void
+    public function __construct(float $memoryLimit = 128, int $gcInterval = 200)
     {
-        if ($this->isInitialized) {
-            return;
-        }
-
-        if ($maxMemoryUsage > 0) {
-            $this->maxMemoryUsage = $maxMemoryUsage;
-        } else {
-            $limit = ini_get('memory_limit') ?: '128M';
-            $this->maxMemoryUsage = MemoryUtils::parseIniMemory($limit);
-        }
-
-        $this->isInitialized = true;
+        $this->memoryLimit = $memoryLimit;
+        $this->gcInterval = $gcInterval;
     }
 
-    public function setMaxMemoryUsage(int $bytes): void
+    public function init(): void
     {
-        $this->maxMemoryUsage = $bytes;
+        gc_enable();
+        gc_collect_cycles();
+        $this->taskCounter = 0;
+        $this->lastMemoryUsage = memory_get_usage(true) / 1024 / 1024;
+        $this->memoryCheckCounter = 0;
     }
 
     public function checkMemoryUsage(): bool
     {
-        $currentUsage = memory_get_usage();
+        $this->memoryCheckCounter++;
 
-        if ($currentUsage > $this->maxMemoryUsage) {
-            $this->forceGarbageCollection();
+        // Check memory less frequently for better performance
+        if ($this->memoryCheckCounter % 50 === 0) {
+            $currentUsage = memory_get_usage(true) / 1024 / 1024;
 
-            if (memory_get_usage() > $this->maxMemoryUsage) {
-                return false; // Memory limit exceeded
+            // Aggressive GC if approaching limit
+            if ($currentUsage > ($this->memoryLimit * self::AGGRESSIVE_GC_THRESHOLD)) {
+                $this->forceGarbageCollection();
+                $currentUsage = memory_get_usage(true) / 1024 / 1024;
             }
+
+            $this->lastMemoryUsage = $currentUsage;
+            return $currentUsage < $this->memoryLimit;
         }
 
-        return true; // Memory usage is within limits
+        // Use cached value for better performance
+        return $this->lastMemoryUsage < $this->memoryLimit;
     }
 
-    private function forceGarbageCollection(): void
+    public function collectGarbage(): void
     {
+        $this->taskCounter++;
+        if ($this->taskCounter >= $this->gcInterval) {
+            $this->performGarbageCollection();
+            $this->taskCounter = 0;
+        }
+    }
+
+    public function forceGarbageCollection(): void
+    {
+        $this->performGarbageCollection();
+        $this->taskCounter = 0;
+    }
+
+    private function performGarbageCollection(): void
+    {
+        // Clear any circular references
         gc_collect_cycles();
+
+        // Update memory usage after GC
+        $this->lastMemoryUsage = memory_get_usage(true) / 1024 / 1024;
+    }
+
+    public function getCurrentMemoryUsage(): float
+    {
+        return memory_get_usage(true) / 1024 / 1024;
+    }
+
+    public function getMemoryLimit(): float
+    {
+        return $this->memoryLimit;
+    }
+
+    public function getMemoryPercentage(): float
+    {
+        return ($this->getCurrentMemoryUsage() / $this->memoryLimit) * 100;
     }
 }

@@ -2,30 +2,19 @@
 
 namespace venndev\vosaka;
 
-final class Timeout {
+final class Timeout
+{
+    private float $startTime;
+    private int $timeoutSeconds;
 
-    private readonly int $timeout;
-
-    public function __construct(
-        public readonly int $seconds = 0
-    ) {
-        if ($seconds < 0) {
-            throw new \InvalidArgumentException('Timeout seconds must be a non-negative integer');
-        }
-
-        $this->timeout = time();
+    public function __construct(int $timeoutSeconds)
+    {
+        $this->startTime = microtime(true);
+        $this->timeoutSeconds = $timeoutSeconds;
     }
 
     public function isTimeout(): bool
     {
-        if ($this->seconds <= 0) {
-            return false;
-        }
-
-        if ($this->timeout === 0) {
-            $this->timeout = time() + $this->seconds;
-        }
-
-        return time() >= $this->timeout; 
+        return (microtime(true) - $this->startTime) >= $this->timeoutSeconds;
     }
 }

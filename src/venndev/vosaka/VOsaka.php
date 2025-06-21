@@ -9,26 +9,31 @@ use RuntimeException;
 use SplQueue;
 use InvalidArgumentException;
 use Closure;
-use SplObjectStorage;
-use stdClass;
 use Throwable;
 
-/**
- * Async task scheduler for PHP using generators
- */
 final class VOsaka
 {
     private static ?SplQueue $taskQueue = null;
-    private static ?SplObjectStorage $deferredTasks = null;
-    private static ?SplObjectStorage $timeoutTasks = null;
+    private static array $deferredTasks = [];
+    private static array $timeoutTasks = [];
     private static array $errorsTasks = [];
     private static int $nextTaskId = 0;
 
     // Maximum tasks to run per period
     private static int $maximumPeriod = 20;
     private static bool $enableMaximumPeriod = false;
+    private static int $maxConcurrentTasks = 100; // Limit concurrent tasks
+    private static bool $enableLogging = false; // Enable/disable error logging
 
     public static ?MemoryManager $memoryManager = null;
+
+    /**
+     * Enable or disable error logging
+     */
+    public static function setEnableLogging(bool $enable): void
+    {
+        self::$enableLogging = $enable;
+    }
 
     /**
      * Execute multiple tasks concurrently and wait for all to complete
@@ -37,6 +42,7 @@ final class VOsaka
     {
         self::initializeTaskQueue();
         self::enqueueTasks($tasks);
+        self::run();
     }
 
     /**
@@ -85,7 +91,6 @@ final class VOsaka
 
     /**
      * Set the maximum number of tasks to run per period
-     * Default is 20 tasks per period.
      */
     public static function setMaximumPeriod(int $maxTasks): void
     {
@@ -97,14 +102,21 @@ final class VOsaka
 
     /**
      * Enable or disable the maximum period limit
-     * This function is used for when you need to apply 
-     *      to a system or software that was originally built 
-     *      not to be built asynchronously with this library.
-     * To make it easy for you to visualize, go to `test4.php`
      */
     public static function setEnableMaximumPeriod(bool $enable): void
     {
         self::$enableMaximumPeriod = $enable;
+    }
+
+    /**
+     * Set maximum concurrent tasks
+     */
+    public static function setMaxConcurrentTasks(int $maxConcurrent): void
+    {
+        if ($maxConcurrent <= 0) {
+            throw new InvalidArgumentException('Maximum concurrent tasks must be a positive integer');
+        }
+        self::$maxConcurrentTasks = $maxConcurrent;
     }
 
     /**
@@ -116,21 +128,14 @@ final class VOsaka
             return;
         }
 
-        $endTime = time() + $seconds;
-
-        while (time() < $endTime) {
+        $endTime = microtime(true) + $seconds;
+        while (microtime(true) < $endTime) {
             yield;
         }
     }
 
     /**
      * Retry a task with exponential backoff
-     * 
-     * @param callable $taskFactory A callable that returns a Generator
-     * @param int $maxRetries Maximum number of retries
-     * @param int $delaySeconds Initial delay in seconds
-     * @param int $backOffMultiplier Multiplier for exponential backoff
-     * @param callable|null $shouldRetry Optional callback to determine if the task should be retried
      */
     public static function retry(
         callable $taskFactory,
@@ -145,9 +150,7 @@ final class VOsaka
             try {
                 $task = $taskFactory();
                 if (!$task instanceof Generator) {
-                    throw new InvalidArgumentException(
-                        'Task must return a Generator'
-                    );
+                    throw new InvalidArgumentException('Task must return a Generator');
                 }
                 yield from $task;
                 return;
@@ -157,13 +160,8 @@ final class VOsaka
                 }
                 $retries++;
                 if ($retries >= $maxRetries) {
-                    throw new RuntimeException(
-                        "Task failed after {$maxRetries} retries",
-                        0,
-                        $e
-                    );
+                    throw new RuntimeException("Task failed after {$maxRetries} retries", 0, $e);
                 }
-
                 $delay = (int) ($delaySeconds * pow($backOffMultiplier, $retries - 1));
                 yield from self::sleep($delay);
             }
@@ -175,7 +173,6 @@ final class VOsaka
      */
     public static function timeout(int $seconds): Timeout
     {
-        self::initializeTimeoutQueue();
         return new Timeout($seconds);
     }
 
@@ -187,18 +184,12 @@ final class VOsaka
         return new Defer($task, ...$args);
     }
 
-    private static function createRepeatTask(Generator|Closure $task, int $interval): Task|RepeatTask
-    {
-        return self::buildTask(
-            callable: $task,
-            repeat: true,
-            interval: $interval
-        );
-    }
-
+    /**
+     * Create and enqueue a repeating task
+     */
     public static function repeat(Closure $task, int $interval = 1): RepeatTask
     {
-        $taskWrapper = self::createRepeatTask($task, $interval);
+        $taskWrapper = new RepeatTask(fn() => $task, self::generateTaskId(), $interval);
         self::initializeTaskQueue();
         self::$taskQueue->enqueue($taskWrapper);
         return $taskWrapper;
@@ -225,20 +216,6 @@ final class VOsaka
         }
     }
 
-    private static function initializeDeferredQueue(): void
-    {
-        if (self::$deferredTasks === null) {
-            self::$deferredTasks = new SplObjectStorage();
-        }
-    }
-
-    private static function initializeTimeoutQueue(): void
-    {
-        if (self::$timeoutTasks === null) {
-            self::$timeoutTasks = new SplObjectStorage();
-        }
-    }
-
     private static function initializeMemoryManager(): void
     {
         if (self::$memoryManager === null) {
@@ -249,14 +226,14 @@ final class VOsaka
     private static function addErrorToTask(Task $task, Throwable $error): void
     {
         self::$errorsTasks[$task->id] = $error;
+        if (self::$enableLogging) {
+            error_log("VOsaka Task {$task->id} failed: " . $error->getMessage());
+        }
     }
 
     private static function getErrorFromTaskAndRemove(Task $task): mixed
     {
         if (isset(self::$errorsTasks[$task->id])) {
-            /**
-             * @var Throwable $error
-             */
             $error = self::$errorsTasks[$task->id];
             unset(self::$errorsTasks[$task->id]);
             return $error;
@@ -271,25 +248,9 @@ final class VOsaka
         }
     }
 
-    private static function buildTask(
-        Generator|Closure $callable,
-        bool $await = false,
-        bool $repeat = false,
-        int $interval = 0
-    ): Task|RepeatTask {
-        if ($repeat) {
-            return new RepeatTask(
-                fn() => $callable,
-                self::generateTaskId(),
-                $interval
-            );
-        }
-        return new Task($callable, $await, self::generateTaskId());
-    }
-
     public static function enqueueTask(Generator $generator, bool $await = false): Task
     {
-        $taskWrapper = self::buildTask($generator, $await);
+        $taskWrapper = new Task($generator, $await, self::generateTaskId());
         self::$taskQueue->enqueue($taskWrapper);
         return $taskWrapper;
     }
@@ -297,7 +258,7 @@ final class VOsaka
     private static function executeAllTasks(): void
     {
         self::initializeTaskQueue();
-        self::executeTasks(false);
+        self::executeTasks(false, true);
     }
 
     private static function executeOneTask(): void
@@ -309,68 +270,90 @@ final class VOsaka
     private static function executeTasks(bool $stopAfterFirst = false, bool $runUntilEmpty = false): void
     {
         self::initializeMemoryManager();
-        self::$memoryManager->init(); // Initialize memory manager
+        self::$memoryManager->init();
 
-        while (true) {
-            if (self::$taskQueue->isEmpty()) {
-                if (!$runUntilEmpty) {
-                    return;
+        $runningTasks = [];
+        $taskCount = 0;
+
+        while (!$stopAfterFirst || count($runningTasks) > 0 || !$runUntilEmpty || !self::$taskQueue->isEmpty()) {
+            while (count($runningTasks) < self::$maxConcurrentTasks && !self::$taskQueue->isEmpty()) {
+                $taskWrapper = self::$taskQueue->dequeue();
+                if ($taskWrapper instanceof Task || $taskWrapper instanceof RepeatTask) {
+                    $runningTasks[$taskWrapper->id] = $taskWrapper;
+                    $taskCount++;
                 }
-                continue;
             }
 
-            $taskWrapper = self::$taskQueue->dequeue();
-
-            if ($taskWrapper instanceof Task) {
-                if ($taskWrapper->isRunning) {
-                    self::$taskQueue->enqueue($taskWrapper);
-                    continue;
-                }
-
-                $taskWrapper->isRunning = true;
-
-                try {
-                    if ($taskWrapper->task->valid()) {
-                        $yieldedValue = $taskWrapper->task->current();
-                        $taskWrapper->task->next();
-                        self::handleYieldedValue($taskWrapper, $yieldedValue);
-                        self::checkForTimeouts($taskWrapper->id);
+            foreach ($runningTasks as $id => $taskWrapper) {
+                if ($taskWrapper instanceof Task) {
+                    if ($taskWrapper->isRunning) {
+                        continue;
                     }
 
-                    $taskWrapper->isRunning = false;
-                    if ($taskWrapper->task->valid()) {
-                        self::$taskQueue->enqueue($taskWrapper);
-                    } else {
+                    $taskWrapper->isRunning = true;
+
+                    try {
+                        if ($taskWrapper->task->valid()) {
+                            $yieldedValue = $taskWrapper->task->current();
+                            $taskWrapper->task->next();
+                            self::handleYieldedValue($taskWrapper, $yieldedValue);
+                            self::checkForTimeouts($taskWrapper->id);
+                        }
+
+                        $taskWrapper->isRunning = false;
+                        if ($taskWrapper->task->valid()) {
+                            self::$taskQueue->enqueue($taskWrapper);
+                        } else {
+                            self::executeCleanupTasks($taskWrapper->id);
+                            unset($runningTasks[$id]);
+                        }
+                    } catch (Throwable $e) {
+                        $taskWrapper->isRunning = false;
                         self::executeCleanupTasks($taskWrapper->id);
+                        unset($runningTasks[$id]);
+                        if ($taskWrapper->await) {
+                            self::addErrorToTask($taskWrapper, $e);
+                        } else {
+                            self::$errorsTasks[$id] = $e;
+                            if (self::$enableLogging) {
+                                error_log("VOsaka Task {$id} failed: " . $e->getMessage());
+                            }
+                        }
                     }
-                } catch (Throwable $e) {
-                    $taskWrapper->isRunning = false;
-                    self::executeCleanupTasks($taskWrapper->id);
-                    if ($taskWrapper->await) {
-                        self::addErrorToTask($taskWrapper, $e);
-                    } else {
-                        throw $e;
+                } elseif ($taskWrapper instanceof RepeatTask) {
+                    if ($taskWrapper->canRun()) {
+                        self::handleRepeatTask($taskWrapper);
+                        $taskWrapper->resetTime();
                     }
+                    self::$taskQueue->enqueue($taskWrapper);
+                    unset($runningTasks[$id]);
+                }
+
+                if (self::$enableMaximumPeriod && $taskCount >= self::$maximumPeriod) {
+                    $taskCount = 0;
+                    self::$memoryManager->collectGarbage(); // Force GC
+                    break 2;
                 }
             }
 
-            if ($taskWrapper instanceof RepeatTask) {
-                if ($taskWrapper->canRun()) {
-                    self::handleRepeatTask($taskWrapper);
-                    $taskWrapper->resetTime();
-                }
-                self::$taskQueue->enqueue($taskWrapper);
-            }
-
-            // Check memory usage and stop if needed
             if (!self::$memoryManager->checkMemoryUsage()) {
-                return;
+                error_log("VOsaka: Memory limit exceeded, stopping execution");
+                break;
+            }
+            self::$memoryManager->collectGarbage();
+
+            if ($stopAfterFirst && count($runningTasks) === 0) {
+                break;
             }
 
-            if ($stopAfterFirst) {
-                return;
+            if ($runUntilEmpty && self::$taskQueue->isEmpty() && count($runningTasks) === 0) {
+                break;
             }
+
+            usleep(100);
         }
+
+        self::$memoryManager->collectGarbage();
     }
 
     private static function handleRepeatTask(RepeatTask $taskWrapper): void
@@ -391,7 +374,6 @@ final class VOsaka
         }
     }
 
-
     private static function handleYieldedValue(Task $taskWrapper, mixed $yieldedValue): void
     {
         if ($yieldedValue instanceof Timeout) {
@@ -403,46 +385,28 @@ final class VOsaka
 
     private static function registerTimeout(Task $taskWrapper, Timeout $timeout): void
     {
-        self::initializeTimeoutQueue();
-
-        $timeoutWrapper = new stdClass();
-        $timeoutWrapper->id = $taskWrapper->id;
-
-        self::$timeoutTasks->attach($timeoutWrapper, $timeout);
+        self::$timeoutTasks[$taskWrapper->id] = $timeout;
     }
 
     private static function registerDeferredTask(Task $taskWrapper, Defer $defer): void
     {
-        self::initializeDeferredQueue();
-
-        $deferWrapper = new stdClass();
-        $deferWrapper->id = $taskWrapper->id;
-        $deferWrapper->task = $defer->task;
-        $deferWrapper->args = $defer->args;
-
-        self::$deferredTasks->attach($deferWrapper, $defer->task);
+        self::$deferredTasks[$taskWrapper->id] = (object) [
+            'task' => $defer->task,
+            'args' => $defer->args
+        ];
     }
 
     private static function checkForTimeouts(int $taskId): void
     {
-        if (self::$timeoutTasks === null) {
+        if (!isset(self::$timeoutTasks[$taskId])) {
             return;
         }
 
-        foreach (self::$timeoutTasks as $timeoutWrapper) {
-            if ($timeoutWrapper->id !== $taskId) {
-                continue;
-            }
-
-            $timeout = self::$timeoutTasks[$timeoutWrapper];
-            if ($timeout->isTimeout()) {
-                self::$timeoutTasks->detach($timeoutWrapper);
-                self::executeCleanupTasks($taskId);
-
-                throw new InvalidArgumentException(
-                    "Task with ID {$taskId} has timed out."
-                );
-            }
+        $timeout = self::$timeoutTasks[$taskId];
+        if ($timeout->isTimeout()) {
+            unset(self::$timeoutTasks[$taskId]);
+            self::executeCleanupTasks($taskId);
+            throw new InvalidArgumentException("Task with ID {$taskId} has timed out.");
         }
     }
 
@@ -454,37 +418,24 @@ final class VOsaka
 
     private static function executeDeferredTasks(int $taskId): void
     {
-        if (self::$deferredTasks === null) {
+        if (!isset(self::$deferredTasks[$taskId])) {
             return;
         }
 
-        foreach (self::$deferredTasks as $deferWrapper) {
-            if ($deferWrapper->id !== $taskId) {
-                continue;
-            }
+        $deferWrapper = self::$deferredTasks[$taskId];
+        $deferredTask = $deferWrapper->task;
+        $result = $deferredTask(...$deferWrapper->args);
 
-            $deferredTask = $deferWrapper->task;
-            $result = $deferredTask(...$deferWrapper->args);
-
-            if ($result instanceof Generator) {
-                self::exhaustGenerator($result);
-            }
-
-            self::$deferredTasks->detach($deferWrapper);
+        if ($result instanceof Generator) {
+            self::exhaustGenerator($result);
         }
+
+        unset(self::$deferredTasks[$taskId]);
     }
 
     private static function cleanupTimeouts(int $taskId): void
     {
-        if (self::$timeoutTasks === null) {
-            return;
-        }
-
-        foreach (self::$timeoutTasks as $timeoutWrapper) {
-            if ($timeoutWrapper->id === $taskId) {
-                self::$timeoutTasks->detach($timeoutWrapper);
-            }
-        }
+        unset(self::$timeoutTasks[$taskId]);
     }
 
     private static function exhaustGenerator(Generator $generator): void
@@ -502,18 +453,12 @@ final class VOsaka
 
         if ($task instanceof Closure) {
             $result = $task();
-
             if (!$result instanceof Generator) {
-                throw new InvalidArgumentException(
-                    'Closure must return a Generator instance'
-                );
+                throw new InvalidArgumentException('Closure must return a Generator instance');
             }
-
             return $result;
         }
 
-        throw new InvalidArgumentException(
-            'Task must be a Generator or Closure that returns a Generator'
-        );
+        throw new InvalidArgumentException('Task must be a Generator or Closure that returns a Generator');
     }
 }

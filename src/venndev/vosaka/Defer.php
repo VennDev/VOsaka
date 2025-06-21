@@ -4,17 +4,14 @@ namespace venndev\vosaka;
 
 use Closure;
 
-final class Defer {
+final class Defer
+{
+    public Closure $task;
+    public array $args;
 
-    public mixed $args = [];
-
-    public function __construct(
-        public readonly Closure $task,
-        ...$args
-    ) {
-        if (!$this->task instanceof Closure) {
-            throw new \InvalidArgumentException('Task must be a Closure');
-        }
+    public function __construct(Closure $task, mixed ...$args)
+    {
+        $this->task = $task;
         $this->args = $args;
     }
 }
