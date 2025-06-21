@@ -10,6 +10,7 @@ use SplQueue;
 use InvalidArgumentException;
 use Closure;
 use Throwable;
+use WeakMap;
 
 final class VOsaka
 {
@@ -22,10 +23,25 @@ final class VOsaka
     // Maximum tasks to run per period
     private static int $maximumPeriod = 20;
     private static bool $enableMaximumPeriod = false;
-    private static int $maxConcurrentTasks = 100; // Limit concurrent tasks
-    private static bool $enableLogging = false; // Enable/disable error logging
+    private static int $maxConcurrentTasks = 100; // Increased back to 100
+    private static bool $enableLogging = false;
 
     public static ?MemoryManager $memoryManager = null;
+
+    // Memory optimization additions
+    private static WeakMap $taskReferences;
+    private static int $cleanupCounter = 0;
+    private static int $forceCleanupThreshold = 50; // Reduced for more frequent cleanup
+
+    /**
+     * Initialize static properties to prevent memory leaks
+     */
+    private static function initializeStatic(): void
+    {
+        if (!isset(self::$taskReferences)) {
+            self::$taskReferences = new WeakMap();
+        }
+    }
 
     /**
      * Enable or disable error logging
@@ -41,8 +57,10 @@ final class VOsaka
     public static function join(Generator ...$tasks): void
     {
         self::initializeTaskQueue();
+        self::initializeStatic();
         self::enqueueTasks($tasks);
         self::run();
+        self::cleanup();
     }
 
     /**
@@ -51,6 +69,7 @@ final class VOsaka
     public static function spawn(Generator|Closure $task): void
     {
         self::initializeTaskQueue();
+        self::initializeStatic();
         $generator = self::convertToGenerator($task);
         self::enqueueTask($generator);
     }
@@ -61,6 +80,7 @@ final class VOsaka
     public static function await(Generator|Closure $task): Result
     {
         self::initializeTaskQueue();
+        self::initializeStatic();
         $fn = function () use ($task): Generator {
             $generator = self::convertToGenerator($task);
             $taskWrapper = self::enqueueTask($generator, true);
@@ -76,7 +96,10 @@ final class VOsaka
                 return $result ?: $e;
             }
         };
-        return new Result($fn());
+
+        $result = new Result($fn());
+        self::performPeriodicCleanup();
+        return $result;
     }
 
     /**
@@ -85,8 +108,10 @@ final class VOsaka
     public static function select(Generator ...$tasks): void
     {
         self::initializeTaskQueue();
+        self::initializeStatic();
         self::enqueueTasks($tasks);
         self::executeOneTask();
+        self::cleanup();
     }
 
     /**
@@ -203,6 +228,63 @@ final class VOsaka
         self::executeAllTasks();
     }
 
+    /**
+     * Force cleanup of all static resources
+     */
+    public static function cleanup(): void
+    {
+        self::$deferredTasks = [];
+        self::$timeoutTasks = [];
+        self::$errorsTasks = [];
+        self::$taskReferences = new WeakMap();
+
+        if (self::$taskQueue !== null) {
+            while (!self::$taskQueue->isEmpty()) {
+                self::$taskQueue->dequeue();
+            }
+            self::$taskQueue = null;
+        }
+
+        if (self::$memoryManager !== null) {
+            self::$memoryManager->forceGarbageCollection();
+        }
+
+        self::$cleanupCounter = 0;
+        gc_collect_cycles();
+    }
+
+    /**
+     * Periodic cleanup to prevent memory accumulation
+     */
+    private static function performPeriodicCleanup(): void
+    {
+        self::$cleanupCounter++;
+
+        if (self::$cleanupCounter >= self::$forceCleanupThreshold) {
+            $activeTaskIds = [];
+            if (self::$taskQueue !== null) {
+                $tempQueue = new SplQueue();
+                while (!self::$taskQueue->isEmpty()) {
+                    $task = self::$taskQueue->dequeue();
+                    $activeTaskIds[$task->id] = true;
+                    $tempQueue->enqueue($task);
+                }
+                self::$taskQueue = $tempQueue;
+            }
+
+            self::$deferredTasks = array_intersect_key(self::$deferredTasks, $activeTaskIds);
+            self::$timeoutTasks = array_intersect_key(self::$timeoutTasks, $activeTaskIds);
+            self::$errorsTasks = array_slice(self::$errorsTasks, -10, null, true);
+
+            self::$cleanupCounter = 0;
+            gc_collect_cycles();
+
+            if (self::$enableLogging) {
+                error_log("VOsaka: Periodic cleanup performed, memory: " . (memory_get_usage(true) / 1024 / 1024) . " MB");
+            }
+        }
+    }
+
     // Private helper methods
     private static function generateTaskId(): int
     {
@@ -213,13 +295,14 @@ final class VOsaka
     {
         if (self::$taskQueue === null) {
             self::$taskQueue = new SplQueue();
+            gc_collect_cycles();
         }
     }
 
     private static function initializeMemoryManager(): void
     {
         if (self::$memoryManager === null) {
-            self::$memoryManager = new MemoryManager();
+            self::$memoryManager = new MemoryManager(32, 25);
         }
     }
 
@@ -228,6 +311,10 @@ final class VOsaka
         self::$errorsTasks[$task->id] = $error;
         if (self::$enableLogging) {
             error_log("VOsaka Task {$task->id} failed: " . $error->getMessage());
+        }
+
+        if (count(self::$errorsTasks) > 25) {
+            self::$errorsTasks = array_slice(self::$errorsTasks, -10, null, true);
         }
     }
 
@@ -252,6 +339,7 @@ final class VOsaka
     {
         $taskWrapper = new Task($generator, $await, self::generateTaskId());
         self::$taskQueue->enqueue($taskWrapper);
+        self::$taskReferences[$taskWrapper] = $taskWrapper->id;
         return $taskWrapper;
     }
 
@@ -273,26 +361,18 @@ final class VOsaka
         self::$memoryManager->init();
 
         $runningTasks = [];
-        $taskCount = 0;
+        $dynamicConcurrent = self::$maxConcurrentTasks;
 
-        while (!$stopAfterFirst || count($runningTasks) > 0 || !$runUntilEmpty || !self::$taskQueue->isEmpty()) {
-            while (count($runningTasks) < self::$maxConcurrentTasks && !self::$taskQueue->isEmpty()) {
+        while (!$stopAfterFirst || !empty($runningTasks) || !$runUntilEmpty || !self::$taskQueue->isEmpty()) {
+            $memoryUsage = memory_get_usage(true) / 1024 / 1024;
+            while (count($runningTasks) < $dynamicConcurrent && !self::$taskQueue->isEmpty()) {
                 $taskWrapper = self::$taskQueue->dequeue();
-                if ($taskWrapper instanceof Task || $taskWrapper instanceof RepeatTask) {
-                    $runningTasks[$taskWrapper->id] = $taskWrapper;
-                    $taskCount++;
-                }
+                $runningTasks[$taskWrapper->id] = $taskWrapper;
             }
 
             foreach ($runningTasks as $id => $taskWrapper) {
-                if ($taskWrapper instanceof Task) {
-                    if ($taskWrapper->isRunning) {
-                        continue;
-                    }
-
-                    $taskWrapper->isRunning = true;
-
-                    try {
+                try {
+                    if ($taskWrapper instanceof Task) {
                         if ($taskWrapper->task->valid()) {
                             $yieldedValue = $taskWrapper->task->current();
                             $taskWrapper->task->next();
@@ -300,60 +380,41 @@ final class VOsaka
                             self::checkForTimeouts($taskWrapper->id);
                         }
 
-                        $taskWrapper->isRunning = false;
-                        if ($taskWrapper->task->valid()) {
-                            self::$taskQueue->enqueue($taskWrapper);
-                        } else {
+                        if (!$taskWrapper->task->valid()) {
                             self::executeCleanupTasks($taskWrapper->id);
-                            unset($runningTasks[$id]);
-                        }
-                    } catch (Throwable $e) {
-                        $taskWrapper->isRunning = false;
-                        self::executeCleanupTasks($taskWrapper->id);
-                        unset($runningTasks[$id]);
-                        if ($taskWrapper->await) {
-                            self::addErrorToTask($taskWrapper, $e);
+                            unset($runningTasks[$id], self::$taskReferences[$taskWrapper]);
                         } else {
-                            self::$errorsTasks[$id] = $e;
-                            if (self::$enableLogging) {
-                                error_log("VOsaka Task {$id} failed: " . $e->getMessage());
-                            }
+                            self::$taskQueue->enqueue($taskWrapper);
                         }
-                    }
-                } elseif ($taskWrapper instanceof RepeatTask) {
-                    if ($taskWrapper->canRun()) {
+                    } elseif ($taskWrapper instanceof RepeatTask && $taskWrapper->canRun()) {
                         self::handleRepeatTask($taskWrapper);
                         $taskWrapper->resetTime();
+                        self::$taskQueue->enqueue($taskWrapper);
                     }
-                    self::$taskQueue->enqueue($taskWrapper);
-                    unset($runningTasks[$id]);
-                }
-
-                if (self::$enableMaximumPeriod && $taskCount >= self::$maximumPeriod) {
-                    $taskCount = 0;
-                    self::$memoryManager->collectGarbage(); // Force GC
-                    break 2;
+                } catch (Throwable $e) {
+                    self::executeCleanupTasks($taskWrapper->id);
+                    unset($runningTasks[$id], self::$taskReferences[$taskWrapper]);
+                    self::addErrorToTask($taskWrapper, $e);
                 }
             }
 
+            self::performPeriodicCleanup();
             if (!self::$memoryManager->checkMemoryUsage()) {
-                error_log("VOsaka: Memory limit exceeded, stopping execution");
-                break;
-            }
-            self::$memoryManager->collectGarbage();
-
-            if ($stopAfterFirst && count($runningTasks) === 0) {
+                error_log("VOsaka: Memory limit exceeded ($memoryUsage MB), stopping execution");
                 break;
             }
 
-            if ($runUntilEmpty && self::$taskQueue->isEmpty() && count($runningTasks) === 0) {
+            if ($stopAfterFirst && empty($runningTasks)) {
                 break;
             }
 
-            usleep(100);
+            if ($runUntilEmpty && self::$taskQueue->isEmpty() && empty($runningTasks)) {
+                break;
+            }
         }
 
-        self::$memoryManager->collectGarbage();
+        self::$memoryManager->forceGarbageCollection();
+        self::cleanup();
     }
 
     private static function handleRepeatTask(RepeatTask $taskWrapper): void
@@ -443,6 +504,7 @@ final class VOsaka
         while ($generator->valid()) {
             $generator->next();
         }
+        unset($generator);
     }
 
     private static function convertToGenerator(Generator|Closure $task): Generator
