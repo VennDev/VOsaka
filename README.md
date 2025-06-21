@@ -3,6 +3,20 @@
 - A synchronous runtime library for PHP
 - This is a project that can replace my old chaotic universe [vamp](https://github.com/VennDev/Vapm)
 
+# Performance
+```yml
+=== VOsaka Results ===
+Duration: 3.34s
+Successful: 3966
+Failed: 1034
+Memory Peak: 9.14 MB
+Memory Current: 4.41 MB
+Completed 5000 tasks in 3.34s
+Tasks/sec: 1495.07
+Memory used: 7.76 MB
+Memory per task: 1.59 KB
+```
+
 # Basic processing methods
 
 - Handle tasks with Sleep, Await, Spawn, Run
