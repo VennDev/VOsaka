@@ -17,7 +17,7 @@ Memory used: 39.69 MB
 Memory per task: 8.13 KB
 ```
 
-# ReactPHP vs VOsaka 
+# ReactPHP vs VOsaka (Compare Small)
 ```yml
 === FINAL COMPARISON RESULTS ===
 
