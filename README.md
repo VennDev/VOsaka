@@ -6,17 +6,89 @@
 # Performance
 ```yml
 === VOsaka Results ===
-Duration: 3.34s
-Successful: 3966
-Failed: 1034
-Memory Peak: 9.14 MB
+Duration: 187.5s
+Successful: 4012
+Failed: 988
+Memory Peak: 41.08 MB
 Memory Current: 4.41 MB
-Completed 5000 tasks in 3.34s
-Tasks/sec: 1495.07
-Memory used: 7.76 MB
-Memory per task: 1.59 KB
+Completed 5000 tasks in 187.5s
+Tasks/sec: 26.67
+Memory used: 39.69 MB
+Memory per task: 8.13 KB
 ```
 
+# ReactPHP vs VOsaka 
+```yml
+=== FINAL COMPARISON RESULTS ===
+
+Benchmark Test (100 URLs):
+----------------------------
+VOsaka:
+  Duration: 0.32s
+  Successful: 83
+  Failed: 17
+  Memory Peak: 0.88 MB
+  Processed: 100 URLs
+
+ReactPHP:
+  Duration: 0.31s
+  Successful: 79
+  Failed: 21
+  Memory Peak: 1.65 MB
+  Memory Current: 1.01 MB
+  Processed: 100 URLs
+
+Memory Leak Test (ReactPHP, 5 batches of 50 URLs):
+-----------------------------------------------
+Batch 1: Memory Diff: 0.02 MB, Total Leak: 0.03 MB
+Batch 2: Memory Diff: 0.02 MB, Total Leak: -0.02 MB
+Batch 3: Memory Diff: 0.02 MB, Total Leak: -0.02 MB
+Batch 4: Memory Diff: 0.02 MB, Total Leak: -0.02 MB
+Batch 5: Memory Diff: 0.02 MB, Total Leak: -0.02 MB
+
+Stress Test (ReactPHP):
+---------------------
+Tasks: 100, Duration: 0.32s, Tasks/sec: 312.5, Memory: 0.7 MB, Memory/Task: 7.22 KB, Processed: 100/100 URLs (Success: 82, Failed: 18)
+Tasks: 500, Duration: 1.55s, Tasks/sec: 322.58, Memory: 0.81 MB, Memory/Task: 1.66 KB, Processed: 500/500 URLs (Success: 401, Failed: 99)
+Tasks: 1000, Duration: 3.11s, Tasks/sec: 321.54, Memory: 0.84 MB, Memory/Task: 0.86 KB, Processed: 1000/1000 URLs (Success: 805, Failed: 195)
+Tasks: 2000, Duration: 6.21s, Tasks/sec: 322.06, Memory: 1 MB, Memory/Task: 0.51 KB, Processed: 2000/2000 URLs (Success: 1622, Failed: 378)
+Tasks: 5000, Duration: 15.53s, Tasks/sec: 321.96, Memory: 1.65 MB, Memory/Task: 0.34 KB, Processed: 5000/5000 URLs (Success: 3987, Failed: 1013)
+
+Memory Leak Test (VOsaka, 5 batches of 50 URLs):
+-----------------------------------------------
+Batch 1: Memory Diff: 0.02 MB, Total Leak: 0.02 MB
+Batch 2: Memory Diff: 0.02 MB, Total Leak: 0.02 MB
+Batch 3: Memory Diff: 0.02 MB, Total Leak: 0.02 MB
+Batch 4: Memory Diff: 0.02 MB, Total Leak: 0.02 MB
+Batch 5: Memory Diff: 0.02 MB, Total Leak: 0.02 MB
+
+Stress Test (VOsaka):
+---------------------
+Tasks: 100, Duration: 0.32s, Tasks/sec: 312.5, Memory: 2.88 MB, Memory/Task: 29.54 KB, Processed: 100/100 URLs (Success: 80, Failed: 20)
+Tasks: 500, Duration: 1.52s, Tasks/sec: 328.95, Memory: 2.85 MB, Memory/Task: 5.84 KB, Processed: 500/500 URLs (Success: 393, Failed: 107)
+Tasks: 1000, Duration: 3.04s, Tasks/sec: 328.95, Memory: 2.81 MB, Memory/Task: 2.88 KB, Processed: 1000/1000 URLs (Success: 807, Failed: 193)
+Tasks: 2000, Duration: 6.09s, Tasks/sec: 328.41, Memory: 2.73 MB, Memory/Task: 1.4 KB, Processed: 2000/2000 URLs (Success: 1580, Failed: 420)
+Tasks: 5000, Duration: 15.22s, Tasks/sec: 328.52, Memory: 2.46 MB, Memory/Task: 0.5 KB, Processed: 5000/5000 URLs (Success: 4030, Failed: 970)
+
+=== Final Stats ===
+VOsaka:
+  Duration: 0.32s
+  Successful: 83
+  Failed: 17
+  Memory Peak: 0.88 MB
+  Memory Current: 0.78 MB
+  Processed: 100 URLs
+
+ReactPHP:
+  Duration: 0.31s
+  Successful: 79
+  Failed: 21
+  Memory Peak: 1.65 MB
+  Memory Current: 1.01 MB
+  Processed: 100 URLs
+
+=== End of Tests ===
+```
 # Basic processing methods
 
 - Handle tasks with Sleep, Await, Spawn, Run
