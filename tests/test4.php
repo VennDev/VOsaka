@@ -12,7 +12,7 @@ function works(): void
 {
     // This is a placeholder for the actual task you want to run.
     // For example, you might want to run a task every second.
-    for ($i = 0; $i < 10000; $i++) {
+    for ($i = 0; $i < 100; $i++) {
         VOsaka::spawn(function (): Generator {
             yield from VOsaka::sleep(1); // Simulate a task that takes 1 second
             yield var_dump('Task executed at: ' . date('H:i:s'));
