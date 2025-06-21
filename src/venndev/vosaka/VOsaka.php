@@ -28,7 +28,7 @@ final class VOsaka
     private static int $maximumPeriod = 20;
     private static bool $enableMaximumPeriod = false;
 
-    public static MemoryManager $memoryManager = new MemoryManager();
+    public static ?MemoryManager $memoryManager = null;
 
     /**
      * Execute multiple tasks concurrently and wait for all to complete
@@ -239,6 +239,13 @@ final class VOsaka
         }
     }
 
+    private static function initializeMemoryManager(): void
+    {
+        if (self::$memoryManager === null) {
+            self::$memoryManager = new MemoryManager();
+        }
+    }
+
     private static function addErrorToTask(Task $task, Throwable $error): void
     {
         self::$errorsTasks[$task->id] = $error;
@@ -301,6 +308,7 @@ final class VOsaka
 
     private static function executeTasks(bool $stopAfterFirst = false, bool $runUntilEmpty = false): void
     {
+        self::initializeMemoryManager();
         self::$memoryManager->init(); // Initialize memory manager
 
         while (true) {
