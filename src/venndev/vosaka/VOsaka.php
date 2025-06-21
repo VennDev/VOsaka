@@ -28,6 +28,8 @@ final class VOsaka
     private static int $maximumPeriod = 20;
     private static bool $enableMaximumPeriod = false;
 
+    public static MemoryManager $memoryManager = new MemoryManager();
+
     /**
      * Execute multiple tasks concurrently and wait for all to complete
      */
@@ -299,6 +301,8 @@ final class VOsaka
 
     private static function executeTasks(bool $stopAfterFirst = false, bool $runUntilEmpty = false): void
     {
+        self::$memoryManager->init(); // Initialize memory manager
+
         while (true) {
             if (self::$taskQueue->isEmpty()) {
                 if (!$runUntilEmpty) {
@@ -348,6 +352,11 @@ final class VOsaka
                     $taskWrapper->resetTime();
                 }
                 self::$taskQueue->enqueue($taskWrapper);
+            }
+
+            // Check memory usage and stop if needed
+            if (!self::$memoryManager->checkMemoryUsage()) {
+                return;
             }
 
             if ($stopAfterFirst) {

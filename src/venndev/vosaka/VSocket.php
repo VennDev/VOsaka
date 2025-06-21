@@ -62,20 +62,20 @@ final class VSocket
 
             stream_set_timeout($this->socket, $this->timeout);
             stream_set_blocking($this->socket, false);
-            
+
             $this->isConnected = true;
             $this->reconnectAttempts = 0;
-            
+
             yield $this->triggerEvent('connected', "Connected to {$this->host}:{$this->port} using {$this->protocol} protocol.");
             return true;
 
         } catch (Throwable $e) {
             yield $this->triggerEvent('connection_failed', $e->getMessage());
-            
+
             if ($this->shouldReconnect && $this->reconnectAttempts < $this->maxReconnectAttempts) {
                 yield from $this->attemptReconnect();
             }
-            
+
             throw $e;
         }
     }
@@ -92,12 +92,12 @@ final class VSocket
                 fclose($this->socket);
                 $this->socket = null;
             }
-            
+
             $this->isConnected = false;
             $this->shouldReconnect = false;
-            
+
             yield $this->triggerEvent('disconnected', "Connection to {$this->host}:{$this->port} closed.");
-            
+
         } catch (Throwable $e) {
             yield $this->triggerEvent('error', "Error during disconnect: " . $e->getMessage());
         }
@@ -116,24 +116,24 @@ final class VSocket
         while ($this->isConnected) {
             try {
                 $data = yield from $this->readDataAsync();
-                
+
                 if ($data === false || $data === '') {
                     if (feof($this->socket)) {
                         yield $this->triggerEvent('connection_lost', "Connection lost");
-                        
+
                         if ($this->shouldReconnect) {
                             yield from $this->attemptReconnect();
                             continue;
                         }
                         break;
                     }
-                    
+
                     yield from VOsaka::sleep(0.01);
                     continue;
                 }
 
                 yield $this->triggerEvent('data_received', $data);
-                
+
             } catch (Throwable $e) {
                 yield $this->triggerEvent('error', "TCP handling error: " . $e->getMessage());
                 break;
@@ -154,14 +154,14 @@ final class VSocket
         while ($this->isConnected) {
             try {
                 $data = @stream_socket_recvfrom($this->socket, $this->bufferSize, 0, $peer);
-                
+
                 if ($data === false || $data === '') {
                     yield from VOsaka::sleep(0.01);
                     continue;
                 }
 
                 yield $this->triggerEvent('data_received', ['data' => $data, 'peer' => $peer]);
-                
+
             } catch (Throwable $e) {
                 yield $this->triggerEvent('error', "UDP handling error: " . $e->getMessage());
                 break;
@@ -172,21 +172,21 @@ final class VSocket
     private function readDataAsync(): Generator
     {
         $startTime = microtime(true);
-        
+
         while (microtime(true) - $startTime < $this->timeout) {
             $data = @fread($this->socket, $this->bufferSize);
-            
+
             if ($data !== false && $data !== '') {
                 return $data;
             }
-            
+
             if (feof($this->socket)) {
                 return false;
             }
-            
+
             yield from VOsaka::sleep(0.001);
         }
-        
+
         throw new InvalidArgumentException("Read timeout exceeded");
     }
 
@@ -198,14 +198,14 @@ final class VSocket
 
         try {
             $bytesWritten = @fwrite($this->socket, $data);
-            
+
             if ($bytesWritten === false) {
                 throw new InvalidArgumentException("Failed to send data");
             }
-            
+
             yield $this->triggerEvent('data_sent', "Sent {$bytesWritten} bytes");
             return $bytesWritten;
-            
+
         } catch (Throwable $e) {
             yield $this->triggerEvent('error', "Send error: " . $e->getMessage());
             throw $e;
@@ -216,17 +216,17 @@ final class VSocket
     {
         $this->reconnectAttempts++;
         $delay = min($this->reconnectDelay * pow(2, $this->reconnectAttempts - 1), 60);
-        
+
         yield $this->triggerEvent('reconnecting', "Attempting reconnection {$this->reconnectAttempts}/{$this->maxReconnectAttempts} in {$delay}s");
-        
+
         yield from VOsaka::sleep($delay);
-        
+
         try {
             $this->isConnected = false;
             yield from $this->connect();
         } catch (Throwable $e) {
             yield $this->triggerEvent('reconnect_failed', "Reconnection failed: " . $e->getMessage());
-            
+
             if ($this->reconnectAttempts >= $this->maxReconnectAttempts) {
                 $this->shouldReconnect = false;
                 throw new InvalidArgumentException("Max reconnection attempts reached");
@@ -241,11 +241,11 @@ final class VSocket
         }
 
         yield $this->triggerEvent('websocket_ready', "WebSocket handler initialized (implementation pending)");
-        
+
         while ($this->isConnected) {
             try {
                 yield from VOsaka::sleep(0.1);
-                
+
             } catch (Throwable $e) {
                 yield $this->triggerEvent('error', "WebSocket error: " . $e->getMessage());
                 break;
@@ -306,12 +306,12 @@ final class VSocket
     public static function connectMultiple(array $sockets): Generator
     {
         $tasks = [];
-        
+
         foreach ($sockets as $socket) {
             if (!$socket instanceof self) {
                 throw new InvalidArgumentException("All items must be VSocket instances");
             }
-            
+
             $tasks[] = $socket->connect();
         }
 
@@ -321,12 +321,12 @@ final class VSocket
     public static function raceConnect(array $sockets): Generator
     {
         $tasks = [];
-        
+
         foreach ($sockets as $socket) {
             if (!$socket instanceof self) {
                 throw new InvalidArgumentException("All items must be VSocket instances");
             }
-            
+
             $tasks[] = $socket->connect();
         }
 
@@ -340,22 +340,22 @@ final class VSocket
         }
 
         $startTime = microtime(true);
-        
+
         try {
             yield from $this->send("PING\n");
-            
+
             $response = yield from $this->readDataAsync();
             $endTime = microtime(true);
-            
+
             $latency = ($endTime - $startTime) * 1000;
-            
+
             yield $this->triggerEvent('ping_response', [
                 'response' => $response,
                 'latency' => $latency
             ]);
-            
+
             return $latency;
-            
+
         } catch (Throwable $e) {
             yield $this->triggerEvent('ping_failed', $e->getMessage());
             throw $e;

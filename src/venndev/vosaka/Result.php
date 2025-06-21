@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace venndev\vosaka;
 
-use Closure;
 use Generator;
 use RuntimeException;
 use Throwable;
